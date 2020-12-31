@@ -61,6 +61,8 @@ controller-manager中内置了很多常见对象的controller，比如deployment
 - 如上当apiserver持久化用户创建的deployment对象之后，deploymentController就可以通过informer机制watch到这个deployment对象，deploymentController开始工作，期望状态为有一个新的deployment被创建了，期待有一个对应的replicaset对象存在，实际并没有，所以deploymentController开始调谐，即通过apiserver创建一个replicaset对象.
 - 当replicaset对象被创建后，controller-manager中的replicasetcontroller开始工作，期望状态是当前存在replicaset对象的spec.replicas字段中配置的pod数，实际状态也是不存在相应的pod，那么replicasetcontroller开始调谐并创建出对应数量的pod
 
+当kubelet通过runtime将容器创建成功并上报apiserver之后，controller-manager中的endpoint controller就会将pod的端点信息（ip、port）更新对应ep对象的status字段中供其他组件使用。
+
 ### scheduler
 kube-scheduler使用informer机制listAndWatch apiserver中nodeName字段为空的pod对象加入到自己的待调度队列，开始为pod选择节点。如上controller-manager创建出来的pod就会被scheduler watch到
 
@@ -124,6 +126,21 @@ ImageGC/ContainerGC根据用户的GC配置判断节点上的镜像/死掉的容�
 VolumeManager负责容器创建过程中设计的volume的attach/detach，以及同步volume状态
 PLEG(Pod LifeCycle Event Generator)负责通过runtime定时relist节点上运行的容器，判断容器状态是否异常，并上报给其他模块处理
 
+### kube-proxy/ingress/openshift-router
+kube-proxy中通过informer listAndWatch apiserver获取整个集群的service、endpoint信息，并通过用户配置的service proxy（如iptables）实现serviceIp的负载，以iptables为例，当一个service对象创建之后，kube-peoxy会根据service的具体类型创建一系列的iptables规则，以便在集群范围内都可以访问到serviceIP:Port，以在节点上访问service涉及的规则举例如下：
+```bash
+flannel+vxlan
+-A OUTPUT -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+-A KUBE-SERVICES ! -s 10.244.0.0/16 -d 10.110.238.91/32 -p tcp -m comment --comment "default/prometheus:tcp cluster IP" -m tcp --dport 9090 -j KUBE-MARK-MASQ
+-A KUBE-MARK-MASQ -j MARK --set-xmark 0x4000/0x4000
+-A KUBE-SERVICES -d 10.110.238.91/32 -p tcp -m comment --comment "default/prometheus:tcp cluster IP" -m tcp --dport 9090 -j KUBE-SVC-FNI7RW7PEKOXZDFO
+-A KUBE-SVC-FNI7RW7PEKOXZDFO -j KUBE-SEP-6FRGWTS5YGV54XWV
+-A KUBE-SEP-6FRGWTS5YGV54XWV -p tcp -m tcp -j DNAT --to-destination 10.244.1.6:9090
+-A OUTPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+-A POSTROUTING -m comment --comment "kubernetes postrouting rules" -j KUBE-POSTROUTING
+-A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -m mark --mark 0x4000/0x4000 -j MASQUERADE
+```
 
+类似的，向ingress(nginx实现)和openshift-router(haproxy实现)，其内部实现与kube-proxy类似，同样的通过informer实时watch相关资源的变化，再reload自己的配置文件来做负载转发。
 
 以上是目前总结的一个Deployment创建之后各个组件的协同工作过程，设计到的很多细节并没有说清楚，之后完善。
